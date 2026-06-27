@@ -1,0 +1,25 @@
+# 跑您的模型
+python scripts/train.py --arch ours --save-path ./checkpoints/ours.pth
+
+# 跑 UNet 基线
+python scripts/train.py --arch unet --save-path ./checkpoints/unet.pth
+
+# 跑 UNet++ 基线
+python scripts/train.py --arch unetpp --save-path ./checkpoints/unetpp.pth
+
+# 跑 nnUNet 架构基线
+python scripts/train.py --arch nnunet --save-path ./checkpoints/nnunet.pth
+
+
+
+# 预测您的模型
+python scripts/predict.py --model-path ./checkpoints/ours.pth --save-dir ./vis_ours
+
+# 预测 UNet
+python scripts/predict.py --model-path ./checkpoints/unet.pth --save-dir ./vis_unet
+
+# 预测 UNet++
+python scripts/predict.py --model-path ./checkpoints/unetpp.pth --save-dir ./vis_unetpp
+
+# 预测 nnUNet
+python scripts/predict.py --model-path ./checkpoints/nnunet.pth --save-dir ./vis_nnunet
