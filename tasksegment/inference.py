@@ -13,7 +13,10 @@ from tqdm import tqdm
 from .configs import DEFAULT_DOMAIN_THRESHOLDS, DEFAULT_MODEL_CONFIG, DEFAULT_POSTPROCESS_CFG
 from .data.datasets import MultiOrganDataset
 from .models.segmentation_model import TaskSegmentModel
-from .models.baselines import StandardUNet, UNetPlusPlus, NNUNetLike # 新增
+
+# 🌟 统一从 baselines 导入所有基线模型
+from .models.baselines import StandardUNet, UNetPlusPlus, NNUNetLike, SwinUnet, TransUNet
+
 from .training.evaluation import logits_to_postprocessed_binary_mask, get_ema_task_tokens
 from .training.metrics import binary_dice, binary_hd95, binary_iou
 from .training.memory import EMATaskMemoryBank
@@ -79,18 +82,32 @@ def load_model(model_path: str, device: torch.device) -> Tuple[torch.nn.Module, 
     checkpoint = _validate_checkpoint_schema(_safe_torch_load(model_path, map_location=device), model_path)
     train_config = checkpoint.get("train_config", {})
     is_baseline = train_config.get("arch") == "baseline"
+    model_config_saved = checkpoint.get("model_config", {})
     
     if is_baseline:
-        arch_name = train_config.get("arch_name", "unet")
-        if arch_name == "unet": model = StandardUNet().to(device)
-        elif arch_name == "unetpp": model = UNetPlusPlus().to(device)
-        elif arch_name == "nnunet": model = NNUNetLike().to(device)
-        else: raise ValueError(f"Unknown baseline arch: {arch_name}")
+        # 从保存的模型配置中精准获取架构名称
+        arch_name = model_config_saved.get("arch", "unet")
+        
+        if arch_name == "unet": 
+            model = StandardUNet().to(device)
+        elif arch_name == "unetpp": 
+            model = UNetPlusPlus().to(device)
+        elif arch_name == "nnunet": 
+            model = NNUNetLike().to(device)
+        elif arch_name == "swinunet":
+            img_size_h = train_config.get("image_size", (512, 512))[0]
+            model = SwinUnet(in_channels=1, num_classes=2, img_size=img_size_h).to(device)
+        elif arch_name == "transunet":
+            img_size_h = train_config.get("image_size", (512, 512))[0]
+            model = TransUNet(in_channels=1, num_classes=2, img_size=img_size_h).to(device)
+        else: 
+            raise ValueError(f"Unknown baseline arch: {arch_name}")
+            
         ema_bank = None
         model_config = {"arch": arch_name}
     else:
         cfg = dict(DEFAULT_MODEL_CONFIG)
-        cfg.update(checkpoint.get("model_config", {}))
+        cfg.update(model_config_saved)
         cfg.pop("decoder_num_classes", None)
         model = TaskSegmentModel(**cfg).to(device)
         ema_bank = EMATaskMemoryBank()
@@ -99,9 +116,15 @@ def load_model(model_path: str, device: torch.device) -> Tuple[torch.nn.Module, 
 
     compatible_state = {}
     model_state = model.state_dict()
+    loaded_keys_count = 0
     for key, value in checkpoint["model_state_dict"].items():
         if key in model_state and tuple(model_state[key].shape) == tuple(value.shape):
             compatible_state[key] = value
+            loaded_keys_count += 1
+            
+    # 打印加载成功率供排查问题
+    print(f"[{model_config.get('arch', 'ours')}] 已成功加载参数数量: {loaded_keys_count} / {len(model_state)}")
+            
     model.load_state_dict(compatible_state, strict=False)
     model.eval()
     
@@ -137,7 +160,7 @@ def save_interpretability_panel(save_path: str, img_np: np.ndarray, gt_np: np.nd
 def predict_all_organs(
     model: torch.nn.Module, test_dataset: MultiOrganDataset, device: torch.device,
     text_bank: Dict[str, torch.Tensor], ema_bank: Optional[EMATaskMemoryBank], 
-    is_baseline: bool = False, # 新增
+    is_baseline: bool = False,
     save_dir: str = "./vis", domain_thresholds: Optional[Dict[str, float]] = None,
     postprocess_cfg: Optional[Dict[str, Union[int, bool]]] = None, use_postprocess: bool = True,
     num_vis_per_organ: int = 5, vis_data_indices: Optional[List[int]] = None, guidance_scale: Optional[float] = None,
@@ -180,8 +203,22 @@ def predict_all_organs(
                 dice_val, iou_val, hd95_val = binary_dice(pred, target), binary_iou(pred, target), binary_hd95(pred, target)
                 dices.append(dice_val); ious.append(iou_val); hd95s.append(hd95_val)
                 
-                # 统计信息省略...
-                case_records.append({"organ": organ, "sample_i": int(sample_i), "data_idx": int(data_idx), "dice": float(dice_val), "iou": float(iou_val), "hd95": float(hd95_val)})
+                # 🌟 计算 FP (假阳性) 和 FN (假阴性)
+                gt_bool = target.astype(bool)
+                pred_bool = pred.astype(bool)
+                fp_area = int(np.logical_and(pred_bool, ~gt_bool).sum())
+                fn_area = int(np.logical_and(~pred_bool, gt_bool).sum())
+                
+                case_records.append({
+                    "organ": organ, 
+                    "sample_i": int(sample_i), 
+                    "data_idx": int(data_idx), 
+                    "dice": float(dice_val), 
+                    "iou": float(iou_val), 
+                    "hd95": float(hd95_val),
+                    "fp_area": fp_area,
+                    "fn_area": fn_area
+                })
 
                 should_save_default_vis = sample_i < num_vis_per_organ
                 should_save_target_vis = int(data_idx) in vis_data_idx_set
@@ -194,4 +231,3 @@ def predict_all_organs(
 
     _save_case_rankings(save_dir, case_records, top_k=20)
     return results
-

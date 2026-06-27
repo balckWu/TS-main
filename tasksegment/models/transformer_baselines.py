@@ -24,8 +24,8 @@ class SwinUnet(BaseBaseline):
         if SwinUNETR is None:
             raise ImportError("请安装 monai: pip install monai")
         
+        # 🌟 修复点：移除了 img_size=(img_size, img_size), 适配 MONAI >= 1.5
         self.net = SwinUNETR(
-            img_size=(img_size, img_size),
             in_channels=in_channels,
             out_channels=num_classes,
             feature_size=48,
@@ -142,36 +142,25 @@ class TransUNet(BaseBaseline):
         
         self.head = nn.Conv2d(64, num_classes, 1)
         self.pool = nn.MaxPool2d(2)
-        # 移除了 self.up，改用动态 F.interpolate
         
         nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
     def forward(self, xq=None, **kwargs):
         x = xq
-        
-        # Encoder
-        e1 = self.encoder1(x)        # [B, 64, H, W]
-        e2 = self.encoder2(self.pool(e1)) # [B, 128, H/2, W/2]
-        e3 = self.encoder3(self.pool(e2)) # [B, 256, H/4, W/4]
-        
-        # ViT Bottleneck
-        x = self.patch_embed(e3)     # [B, 512, H/16, W/16] (对于512输入，这里是8x8)
+        e1 = self.encoder1(x)
+        e2 = self.encoder2(self.pool(e1))
+        e3 = self.encoder3(self.pool(e2))
+        x = self.patch_embed(e3)
         B, C, H, W = x.shape
-        x = x.flatten(2).transpose(1, 2) # [B, N, 512]
+        x = x.flatten(2).transpose(1, 2)
         x = x + self.pos_embed
         x = self.transformer(x)
         x = self.norm(x).transpose(1, 2).reshape(B, C, H, W) 
-        
-        # Decoder (使用动态插值替代固定 scale_factor 的 Upsample)
         d3 = F.interpolate(x, size=e3.shape[2:], mode='bilinear', align_corners=False)
         d3 = self.decoder3(torch.cat([d3, e3], dim=1)) 
-        
         d2 = F.interpolate(d3, size=e2.shape[2:], mode='bilinear', align_corners=False)
         d2 = self.decoder2(torch.cat([d2, e2], dim=1)) 
-        
         d1 = F.interpolate(d2, size=e1.shape[2:], mode='bilinear', align_corners=False)
         d1 = self.decoder1(torch.cat([d1, e1], dim=1)) 
-        
         logits = self.head(d1)
         return {"pred_masks": logits}
-
